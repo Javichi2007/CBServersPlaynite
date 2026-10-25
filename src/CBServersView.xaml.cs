@@ -141,7 +141,8 @@ namespace CBServersPlaynite
 
         private void UpdateCounts()
         {
-            GamesCountText.Text = allGames.Count + " JUEGOS · " + allGames.Count(game => game.Installed) + " INSTALADOS";
+            var installed = allGames.Count(game => game.Installed);
+            GamesCountText.Text = allGames.Count + " JUEGOS · " + installed + (installed == 1 ? " INSTALADO" : " INSTALADOS");
         }
 
         private void UpdateLauncherStatus()

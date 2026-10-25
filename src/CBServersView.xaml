@@ -320,12 +320,16 @@
                                             </Border>
                                         </Grid>
 
-                                        <Grid Grid.Row="1" Margin="12,10,12,10">
-                                            <StackPanel VerticalAlignment="Center" Margin="0,0,0,0">
+                                        <Grid Grid.Row="1" Margin="12,8,12,8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0" VerticalAlignment="Center">
                                                 <TextBlock Text="{Binding Name}" FontSize="12" FontWeight="SemiBold" Foreground="#E9EEF4" TextTrimming="CharacterEllipsis" />
                                                 <TextBlock Text="{Binding SubText}" FontSize="10" Foreground="#7F8C9A" TextTrimming="CharacterEllipsis" Margin="0,2,0,0" />
                                             </StackPanel>
-                                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="8,0,0,0">
                                                 <Button Content="{Binding PlayButtonText}" Style="{StaticResource PrimaryButton}" Click="Play_Click" Tag="{Binding}" />
                                                 <Button Content="•••" Style="{StaticResource PillButton}" Padding="8,4" Margin="5,0,0,0" Click="Menu_Click" Tag="{Binding}" />
                                             </StackPanel>
