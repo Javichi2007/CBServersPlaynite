@@ -14,7 +14,7 @@
   <a href="https://github.com/Javichi2007/CBServersPlaynite/issues">Issues</a>
 </p>
 
-Añade una entrada **CB Servers** en la barra lateral de Playnite con el catálogo de Call of Duty de CB, jugadores y servidores en vivo, y botones para instalar o jugar usando tu launcher ya instalado.
+Añade una entrada **CB Servers** en la barra lateral de Playnite con el catálogo de Call of Duty de CB, jugadores y servidores en vivo, amigos conectados y botones para instalar o jugar. **No hace falta instalar CB Launcher por separado**: el plugin lo descarga y verifica automáticamente la primera vez que lo necesita.
 
 ## Características
 
@@ -22,17 +22,21 @@ Añade una entrada **CB Servers** en la barra lateral de Playnite con el catálo
 - **18 juegos** del catálogo de CB: CoD 1, UO, 2, 4, WaW, BO1, MW2, BO2, MW3, BO3, Ghosts, AW, MWR, IW, WWII, MW2R, BO4 y HorizonMW.
 - **Jugadores y servidores en vivo** desde la API pública de CB (`/v1/player-counts`).
 - **Navegador de servidores** por juego (`/v1/servers`) con mapa, modo, región, jugadores, bots y servidores destacados.
-- **Detección automática de `cb-launcher.exe`**: protocolo `cbservers://`, carpeta de descargas, escritorio, `%LOCALAPPDATA%\cbservers` y la carpeta del plugin.
+- **Pestaña AMIGOS** con presencia en línea, juego/modo/mapa actual y última conexión.
+  - Agrega amigos por handle, acepta o rechaza solicitudes, cancela las enviadas y elimina amigos.
+  - Actualización automática cada minuto mientras miras la pestaña.
+- **CB Launcher automático**: si no está instalado, se descarga desde el GitHub oficial y se comprueba su SHA-256 antes de usarlo.
+- **Detección de `cb-launcher.exe`**: protocolo `cbservers://`, carpeta de descargas, escritorio, `%LOCALAPPDATA%\cbservers`, la carpeta del plugin y la descarga propia.
 - **Instalación y lanzamiento** con `-install`, `-launch` y `-mode`, o mediante el protocolo `cbservers://` si el launcher ya está abierto.
 - **Estado real de instalación** leído de `%LOCALAPPDATA%\cbservers\user\properties.json`.
-- **Ajustes** de ruta del launcher, juego del navegador de servidores y opciones de CB (cerrar al lanzar, modo offline).
+- **Ajustes** de ruta del launcher, descarga automática, juego del navegador de servidores y opciones de CB (cerrar al lanzar, modo offline).
 - Interfaz en español, sin telemetría ni servicios propios.
 
 ## Requisitos
 
 - Windows 10/11.
 - [Playnite](https://playnite.link/) 10 o superior (probado con 10.62).
-- [CB Servers Launcher](https://github.com/CBServers/cb-launcher) instalado. El plugin puede detectarlo solo, pero también puedes indicar la ruta manualmente.
+- Conexión a Internet la primera vez (para descargar CB Launcher si no lo tienes).
 
 ## Instalación
 
@@ -40,24 +44,35 @@ Añade una entrada **CB Servers** en la barra lateral de Playnite con el catálo
 2. En Playnite ve a **Add-ons → Install add-on from file** y selecciona el `.pext` (o haz doble clic sobre el archivo).
 3. Reinicia Playnite si la entrada **CB Servers** no aparece al momento.
 
-La extensión no incluye el launcher ni los juegos: solo los abre y consulta sus datos.
+La extensión no incluye el launcher ni los juegos: descarga el launcher oficial y este se encarga de los juegos.
 
 ## Uso
 
 - Entra en **CB Servers** desde la barra lateral.
 - Pulsa **INSTALAR** si el juego no está instalado o **JUGAR** si ya lo está. Si el juego tiene varios modos, aparecerá un menú para elegir campaña, multijugador, zombis, etc.
+- La primera vez, el plugin descarga CB Launcher, lo abre e inicia sesión con tu cuenta de CB.
 - En la pestaña **Servidores** elige un juego para ver sus servidores en vivo.
-- Si el launcher no se detecta, abre **Ajustes**, pulsa **Examinar** y selecciona `cb-launcher.exe`.
+- En la pestaña **Amigos** escribe un handle y pulsa **AGREGAR**; acepta solicitudes con **ACEPTAR** y quita amigos con la **✕**.
+- Si ya tienes CB Launcher en otro sitio, abre **Ajustes → Examinar** y selecciona `cb-launcher.exe`.
 - El botón de la carpeta de datos abre `%LOCALAPPDATA%\cbservers` para revisar la instalación.
 
 Juegos sin navegador de servidores en la API de CB (BO3, Infinite Warfare, MW2R y HorizonMW) muestran 0 servidores; el resto de funciones sigue disponible.
 
+## Privacidad y seguridad
+
+- El plugin usa la identidad local que CB Launcher guarda en este PC (clave P-256 protegida con DPAPI) únicamente para firmar las peticiones de amigos que envía a la API de CB.
+- La clave se descifra en memoria, nunca se escribe en otro sitio ni se envía a terceros.
+- Las peticiones de amigos solo van a `https://social.cbservers.xyz` (con `https://social.cbservers.dev` como alternativa).
+- El launcher descargado proviene del repositorio oficial `CBServers/cb-launcher` y se valida con el SHA-256 publicado en sus releases.
+
 ## Cómo funciona
 
 - La ruta del launcher se guarda en `ExtensionsData/<plugin-id>/settings.json` de Playnite.
+- La descarga automática se guarda en `ExtensionsData/<plugin-id>/launcher/cb-launcher.exe`.
 - Los datos de instalación y el nombre de jugador se leen del archivo local de CB, sin enviarlos a ningún sitio.
 - Las consultas de jugadores y servidores van a `https://servers.cbservers.xyz` (con `https://servers.cbservers.dev` como alternativa).
 - Los juegos se lanzan con el protocolo `cbservers://` cuando el launcher ya está en ejecución, o con los argumentos `-launch <juego> [-mode <modo>]`.
+
 
 ## Compilar
 
@@ -85,7 +100,8 @@ CBServersPlaynite/
 │  ├─ CBServersPlugin.cs      # Entrada del plugin y entrada del sidebar
 │  ├─ CBServersView.xaml      # Interfaz
 │  ├─ CBServersView.xaml.cs   # Lógica de la vista
-│  ├─ LauncherService.cs      # Detección del launcher, API de CB y lanzamiento
+│  ├─ LauncherService.cs      # Detección/descarga del launcher, API de CB y lanzamiento
+│  ├─ SocialService.cs        # Amigos, solicitudes y presencia firmadas con la identidad local
 │  ├─ Models.cs               # Catálogo de juegos y modelos
 │  ├─ Settings.cs             # Ajustes persistidos
 │  └─ Converters.cs           # Convertidores WPF
@@ -107,11 +123,13 @@ Créditos a [CBServers](https://github.com/CBServers) por el launcher y su API.
 
 ## English
 
-Unofficial Playnite extension for [CB Servers Launcher](https://github.com/CBServers/cb-launcher). It adds a **CB Servers** sidebar entry with the Call of Duty catalog, live player/server counts, a per-game server browser, and launch/install buttons that reuse your existing launcher.
+Unofficial Playnite extension for [CB Servers Launcher](https://github.com/CBServers/cb-launcher). It adds a **CB Servers** sidebar entry with the Call of Duty catalog, live player/server counts, a per-game server browser, a friends list with live presence, and launch/install buttons. **CB Launcher is not a prerequisite**: the plugin downloads and SHA-256 verifies the official build the first time it is needed.
 
-**Install:** download the latest `.pext` from Releases and use *Add-ons → Install add-on from file*, then restart Playnite. The extension can auto-detect `cb-launcher.exe`; otherwise set the path in its settings.
+**Install:** download the latest `.pext` from Releases and use *Add-ons → Install add-on from file*, then restart Playnite.
 
-**Requirements:** Windows, Playnite 10+, and CB Servers Launcher. The launcher and the games are not bundled. Network calls go only to CB's public server API.
+**Friends:** add players by handle, accept or decline requests, and see who is online, what they are playing, and when they were last seen. Refreshes automatically every minute.
+
+**Privacy:** the locally stored CB identity (DPAPI-protected P-256 key) is decrypted in memory only to sign requests sent to CB's social API. It is never stored elsewhere or shared with third parties. Network calls go only to CB's public servers.
 
 **Build:** `dotnet build -c Release`, then `.\build.ps1` to produce `dist/CBServersPlaynite_<version>.pext` (requires .NET SDK 8).
 

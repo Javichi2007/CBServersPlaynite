@@ -19,20 +19,28 @@ namespace CBServersPlaynite
     public partial class CBServersView : UserControl
     {
         private readonly LauncherService service;
+        private readonly SocialService social;
         private readonly IPlayniteAPI api;
         private readonly List<CbGame> allGames;
         private readonly ObservableCollection<CbGame> visibleGames = new ObservableCollection<CbGame>();
         private readonly ObservableCollection<ServerInfo> servers = new ObservableCollection<ServerInfo>();
         private readonly List<ServerInfo> allServers = new List<ServerInfo>();
+        private readonly ObservableCollection<CbFriend> incomingFriends = new ObservableCollection<CbFriend>();
+        private readonly ObservableCollection<CbFriend> outgoingFriends = new ObservableCollection<CbFriend>();
+        private readonly ObservableCollection<CbFriend> onlineFriends = new ObservableCollection<CbFriend>();
+        private readonly ObservableCollection<CbFriend> offlineFriends = new ObservableCollection<CbFriend>();
 
         private readonly DispatcherTimer dataTimer;
         private readonly DispatcherTimer serverTimer;
+        private readonly DispatcherTimer socialTimer;
 
         private CbGame detailGame;
         private CbGame currentServerGame;
         private string filter = "all";
         private bool suppressToggles;
         private bool serversLoading;
+        private bool friendsLoading;
+        private bool launcherPreparing;
         private bool loadedOnce;
 
         public CBServersView(LauncherService service, IPlayniteAPI api)
@@ -41,11 +49,16 @@ namespace CBServersPlaynite
 
             this.service = service;
             this.api = api;
+            social = new SocialService(service);
             allGames = Catalog.Create(Path.Combine(service.PluginRoot, "Assets", "Games"));
 
             GamesPanel.ItemsSource = visibleGames;
             ServersList.ItemsSource = servers;
             ServerGameList.ItemsSource = allGames;
+            IncomingList.ItemsSource = incomingFriends;
+            OutgoingList.ItemsSource = outgoingFriends;
+            OnlineFriendList.ItemsSource = onlineFriends;
+            OfflineFriendList.ItemsSource = offlineFriends;
 
             HeaderLogo.Source = LoadBitmap(Path.Combine(service.PluginRoot, "Assets", "cb-icon.png"), 64);
             VersionLabel.Text = "v" + Assembly.GetExecutingAssembly().GetName().Version.ToString(3);
@@ -62,8 +75,18 @@ namespace CBServersPlaynite
                 }
             };
 
+            socialTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(60) };
+            socialTimer.Tick += async (sender, args) =>
+            {
+                if (FriendsTab.Visibility == Visibility.Visible && !friendsLoading)
+                {
+                    await LoadFriendsAsync(true);
+                }
+            };
+
             ApplyFilter();
             UpdateLauncherStatus();
+            UpdateFriendsIdentity();
 
             Loaded += OnLoaded;
             Unloaded += OnUnloaded;
@@ -74,6 +97,7 @@ namespace CBServersPlaynite
         {
             dataTimer.Start();
             serverTimer.Start();
+            socialTimer.Start();
 
             if (!loadedOnce)
             {
@@ -86,6 +110,7 @@ namespace CBServersPlaynite
         {
             dataTimer.Stop();
             serverTimer.Stop();
+            socialTimer.Stop();
         }
 
         private void OnPreviewKeyDown(object sender, KeyEventArgs e)
@@ -203,18 +228,18 @@ namespace CBServersPlaynite
             if (game != null) OpenDetail(game);
         }
 
-        private void Play_Click(object sender, RoutedEventArgs e)
+        private async void Play_Click(object sender, RoutedEventArgs e)
         {
             var game = GetGame(sender);
             if (game == null) return;
 
             if (!game.Installed)
             {
-                InstallGame(game);
+                await InstallGameAsync(game);
                 return;
             }
 
-            LaunchGame(game, game.DefaultMode);
+            await LaunchGameAsync(game, game.DefaultMode);
         }
 
         private void Menu_Click(object sender, RoutedEventArgs e)
@@ -230,34 +255,74 @@ namespace CBServersPlaynite
                 {
                     var captured = mode;
                     var item = new MenuItem { Header = "Jugar · " + ModeLabels.Label(mode) };
-                    item.Click += (s, args) => LaunchGame(game, captured);
+                    item.Click += async (s, args) => await LaunchGameAsync(game, captured);
                     menu.Items.Add(item);
                 }
                 menu.Items.Add(new Separator());
             }
 
-            AddMenu(menu, game.Installed ? "Reinstalar / actualizar" : "Instalar", () => InstallGame(game));
-            AddMenu(menu, "Abrir ficha en CB", () => OpenPage(game));
-            AddMenu(menu, "Abrir mods en CB", () => OpenMods(game));
+            AddMenu(menu, game.Installed ? "Reinstalar / actualizar" : "Instalar", () => InstallGameAsync(game));
+            AddMenu(menu, "Abrir ficha en CB", () => OpenPageAsync(game));
+            AddMenu(menu, "Abrir mods en CB", () => OpenModsAsync(game));
             if (!string.IsNullOrEmpty(game.InstallPath))
             {
-                AddMenu(menu, "Abrir carpeta de instalación", () => Guard(() => service.OpenFolder(game.InstallPath)));
+                AddMenu(menu, "Abrir carpeta de instalación", () => GuardAsync(() => service.OpenFolder(game.InstallPath)));
             }
-            AddMenu(menu, "Ver detalles", () => OpenDetail(game));
+            AddMenu(menu, "Ver detalles", () => { OpenDetail(game); return Done(); });
 
             menu.PlacementTarget = sender as UIElement;
             menu.IsOpen = true;
         }
 
-        private static void AddMenu(ContextMenu menu, string header, Action action)
+        private static void AddMenu(ContextMenu menu, string header, Func<Task> action)
         {
             var item = new MenuItem { Header = header };
-            item.Click += (s, e) => action();
+            item.Click += async (s, e) => await action();
             menu.Items.Add(item);
         }
 
-        private void LaunchGame(CbGame game, string mode)
+        private static Task Done()
         {
+            return Task.FromResult(0);
+        }
+
+        private async Task<bool> EnsureLauncherReadyAsync()
+        {
+            if (!string.IsNullOrEmpty(service.LauncherPath) && File.Exists(service.LauncherPath)) return true;
+            if (launcherPreparing)
+            {
+                SetStatus("La descarga de CB Launcher ya está en curso…");
+                return false;
+            }
+
+            launcherPreparing = true;
+            SetStatus("Descargando CB Launcher (solo la primera vez)…");
+
+            try
+            {
+                await service.EnsureLauncherAsync();
+                UpdateLauncherStatus();
+                UpdateSettingsValues(service.ReadProperties());
+                var ignored = RefreshDataAsync();
+                SetStatus("CB Launcher listo: " + service.LauncherPath);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                api.Dialogs.ShowErrorMessage(ex.Message, "CB Servers");
+                SetStatus("No se pudo preparar CB Launcher.");
+                return false;
+            }
+            finally
+            {
+                launcherPreparing = false;
+            }
+        }
+
+        private async Task LaunchGameAsync(CbGame game, string mode)
+        {
+            if (!await EnsureLauncherReadyAsync()) return;
+
             Guard(() =>
             {
                 service.Launch(game, mode);
@@ -266,8 +331,10 @@ namespace CBServersPlaynite
             });
         }
 
-        private void InstallGame(CbGame game)
+        private async Task InstallGameAsync(CbGame game)
         {
+            if (!await EnsureLauncherReadyAsync()) return;
+
             Guard(() =>
             {
                 service.Install(game);
@@ -276,8 +343,10 @@ namespace CBServersPlaynite
             });
         }
 
-        private void OpenPage(CbGame game)
+        private async Task OpenPageAsync(CbGame game)
         {
+            if (!await EnsureLauncherReadyAsync()) return;
+
             Guard(() =>
             {
                 service.OpenGamePage(game);
@@ -285,8 +354,10 @@ namespace CBServersPlaynite
             });
         }
 
-        private void OpenMods(CbGame game)
+        private async Task OpenModsAsync(CbGame game)
         {
+            if (!await EnsureLauncherReadyAsync()) return;
+
             Guard(() =>
             {
                 service.OpenMods(game);
@@ -311,6 +382,12 @@ namespace CBServersPlaynite
             {
                 api.Dialogs.ShowErrorMessage(ex.Message, "CB Servers");
             }
+        }
+
+        private Task GuardAsync(Action action)
+        {
+            Guard(action);
+            return Done();
         }
 
         // ---------------- Detalle ----------------
@@ -342,7 +419,7 @@ namespace CBServersPlaynite
                         Style = (Style)FindResource("PillButton"),
                         Margin = new Thickness(0, 0, 6, 6)
                     };
-                    button.Click += (s, e) => LaunchGame(game, captured);
+                    button.Click += async (s, e) => await LaunchGameAsync(game, captured);
                     DetailModes.Children.Add(button);
                 }
             }
@@ -355,7 +432,7 @@ namespace CBServersPlaynite
                     Style = (Style)FindResource("PillButton"),
                     Margin = new Thickness(0, 0, 6, 6)
                 };
-                button.Click += (s, e) => LaunchGame(game, null);
+                button.Click += async (s, e) => await LaunchGameAsync(game, null);
                 DetailModes.Children.Add(button);
             }
 
@@ -384,26 +461,26 @@ namespace CBServersPlaynite
             CloseDetail();
         }
 
-        private void DetailPlay_Click(object sender, RoutedEventArgs e)
+        private async void DetailPlay_Click(object sender, RoutedEventArgs e)
         {
             if (detailGame == null) return;
-            if (detailGame.Installed) LaunchGame(detailGame, detailGame.DefaultMode);
-            else InstallGame(detailGame);
+            if (detailGame.Installed) await LaunchGameAsync(detailGame, detailGame.DefaultMode);
+            else await InstallGameAsync(detailGame);
         }
 
-        private void DetailInstall_Click(object sender, RoutedEventArgs e)
+        private async void DetailInstall_Click(object sender, RoutedEventArgs e)
         {
-            if (detailGame != null) InstallGame(detailGame);
+            if (detailGame != null) await InstallGameAsync(detailGame);
         }
 
-        private void DetailOpenPage_Click(object sender, RoutedEventArgs e)
+        private async void DetailOpenPage_Click(object sender, RoutedEventArgs e)
         {
-            if (detailGame != null) OpenPage(detailGame);
+            if (detailGame != null) await OpenPageAsync(detailGame);
         }
 
-        private void DetailMods_Click(object sender, RoutedEventArgs e)
+        private async void DetailMods_Click(object sender, RoutedEventArgs e)
         {
-            if (detailGame != null) OpenMods(detailGame);
+            if (detailGame != null) await OpenModsAsync(detailGame);
         }
 
         private void DetailFolder_Click(object sender, RoutedEventArgs e)
@@ -527,16 +604,13 @@ namespace CBServersPlaynite
             }
         }
 
-        private void OpenServerGame_Click(object sender, RoutedEventArgs e)
+        private async void OpenServerGame_Click(object sender, RoutedEventArgs e)
         {
             var game = currentServerGame ?? ServerGameList.SelectedItem as CbGame;
             if (game == null) return;
 
-            Guard(() =>
-            {
-                service.OpenGamePage(game);
-                SetStatus("Ficha de " + game.Name + " abierta en CB. Entra al servidor desde su pestaña Servers.");
-            });
+            await OpenPageAsync(game);
+            SetStatus("Ficha de " + game.Name + " abierta en CB. Entra al servidor desde su pestaña Servers.");
         }
 
         // ---------------- Ajustes ----------------
@@ -547,6 +621,10 @@ namespace CBServersPlaynite
             {
                 LauncherPathBox.Text = service.LauncherPath ?? "";
             }
+
+            LauncherStateText.Text = string.IsNullOrEmpty(service.LauncherPath)
+                ? "No instalado · se descarga al usarlo"
+                : "Listo para usar";
 
             DataPathText.Text = service.DataRoot ?? "No detectada";
             PlayerNameText.Text = service.GetPlayerName(properties) ?? "Sin nombre configurado";
@@ -588,9 +666,20 @@ namespace CBServersPlaynite
             SetStatus(service.LauncherPath == null ? "No se ha encontrado cb-launcher.exe." : "Launcher detectado: " + service.LauncherPath);
         }
 
-        private void OpenLauncher_Click(object sender, RoutedEventArgs e)
+        private async void OpenLauncher_Click(object sender, RoutedEventArgs e)
         {
+            if (!await EnsureLauncherReadyAsync()) return;
             Guard(() => service.OpenLauncher());
+        }
+
+        private async void DownloadLauncher_Click(object sender, RoutedEventArgs e)
+        {
+            SetStatus("Preparando CB Launcher…");
+            if (await EnsureLauncherReadyAsync())
+            {
+                UpdateSettingsValues(service.ReadProperties());
+                SetStatus("CB Launcher disponible en " + service.LauncherPath);
+            }
         }
 
         private void OpenDataFolder_Click(object sender, RoutedEventArgs e)
@@ -639,6 +728,272 @@ namespace CBServersPlaynite
             }
         }
 
+        // ---------------- Amigos ----------------
+
+        private void UpdateFriendsIdentity()
+        {
+            social.ReloadIdentity();
+
+            var linked = social.IsLinked;
+            FriendsSetupPanel.Visibility = linked ? Visibility.Collapsed : Visibility.Visible;
+            FriendActionsPanel.IsEnabled = linked;
+            FriendActionsPanel.Opacity = linked ? 1.0 : 0.55;
+
+            if (linked)
+            {
+                FriendsErrorText.Visibility = Visibility.Collapsed;
+                FriendsEmptyPanel.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            FriendsSetupText.Text = social.LinkError ?? "Conecta tu cuenta de CB para ver a tus amigos.";
+            FriendsDownloadButton.Content = string.IsNullOrEmpty(service.LauncherPath) ? "DESCARGAR CB" : "ABRIR CB";
+            FriendsCountText.Text = "SIN CUENTA";
+            FriendsStateDot.Fill = new SolidColorBrush(Color.FromRgb(0x5A, 0x66, 0x73));
+
+            IncomingList.Visibility = Visibility.Collapsed;
+            OutgoingList.Visibility = Visibility.Collapsed;
+            RequestsSection.Visibility = Visibility.Collapsed;
+            OnlineSection.Visibility = Visibility.Collapsed;
+            OfflineSection.Visibility = Visibility.Collapsed;
+
+            FriendsEmptyPanel.Visibility = Visibility.Visible;
+            FriendsEmptyTitle.Text = "Conecta tu cuenta de CB";
+            FriendsEmptyText.Text = "Descarga y abre CB Launcher una vez para crear tu identidad. Después pulsa REINTENTAR y tus amigos aparecerán aquí.";
+        }
+
+        private async Task LoadFriendsAsync(bool silent = false)
+        {
+            if (friendsLoading) return;
+
+            UpdateFriendsIdentity();
+            if (!social.IsLinked)
+            {
+                ClearFriends();
+                return;
+            }
+
+            friendsLoading = true;
+            if (!silent)
+            {
+                FriendsCountText.Text = "Cargando…";
+                FriendsStateDot.Fill = new SolidColorBrush(Color.FromRgb(0xFF, 0x6A, 0x1A));
+            }
+
+            try
+            {
+                var snapshot = await social.GetFriendsAsync();
+
+                incomingFriends.Clear();
+                outgoingFriends.Clear();
+                onlineFriends.Clear();
+                offlineFriends.Clear();
+
+                foreach (var friend in snapshot.Incoming.OrderBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase))
+                    incomingFriends.Add(friend);
+                foreach (var friend in snapshot.Outgoing.OrderBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase))
+                    outgoingFriends.Add(friend);
+                foreach (var friend in snapshot.Friends.Where(item => item.Online).OrderBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase))
+                    onlineFriends.Add(friend);
+                foreach (var friend in snapshot.Friends.Where(item => !item.Online).OrderByDescending(item => item.LastSeen).ThenBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase))
+                    offlineFriends.Add(friend);
+
+                FriendsStateDot.Fill = new SolidColorBrush(snapshot.OnlineCount > 0 ? Color.FromRgb(0x35, 0xD3, 0x99) : Color.FromRgb(0x5A, 0x66, 0x73));
+                FriendsCountText.Text = snapshot.OnlineCount + " EN LÍNEA · " + snapshot.Friends.Count + (snapshot.Friends.Count == 1 ? " AMIGO" : " AMIGOS");
+                if (snapshot.RequestCount > 0)
+                {
+                    FriendsCountText.Text += " · " + snapshot.RequestCount + (snapshot.RequestCount == 1 ? " SOLICITUD" : " SOLICITUDES");
+                }
+
+                FriendsErrorText.Visibility = Visibility.Collapsed;
+                UpdateFriendSections();
+
+                if (!silent) SetStatus("Amigos actualizados · " + DateTime.Now.ToString("HH:mm"));
+            }
+            catch (Exception ex)
+            {
+                ClearFriends();
+                FriendsStateDot.Fill = new SolidColorBrush(Color.FromRgb(0xFF, 0x6A, 0x6A));
+                FriendsCountText.Text = "SIN CONEXIÓN";
+                FriendsErrorText.Text = ex.Message;
+                FriendsErrorText.Visibility = Visibility.Visible;
+                UpdateFriendSections();
+                FriendsEmptyPanel.Visibility = Visibility.Collapsed;
+            }
+            finally
+            {
+                friendsLoading = false;
+            }
+        }
+
+        private void ClearFriends()
+        {
+            incomingFriends.Clear();
+            outgoingFriends.Clear();
+            onlineFriends.Clear();
+            offlineFriends.Clear();
+        }
+
+        private void UpdateFriendSections()
+        {
+            var requests = incomingFriends.Count + outgoingFriends.Count;
+
+            RequestsSection.Visibility = requests > 0 ? Visibility.Visible : Visibility.Collapsed;
+            RequestsHeader.Text = "SOLICITUDES · " + requests;
+            IncomingList.Visibility = incomingFriends.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            OutgoingList.Visibility = outgoingFriends.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+            OnlineSection.Visibility = onlineFriends.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            OfflineSection.Visibility = offlineFriends.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            OnlineHeader.Text = "EN LÍNEA · " + onlineFriends.Count;
+            OfflineHeader.Text = "DESCONECTADOS · " + offlineFriends.Count;
+
+            if (!social.IsLinked)
+            {
+                FriendsEmptyPanel.Visibility = Visibility.Visible;
+                return;
+            }
+
+            var empty = requests == 0 && onlineFriends.Count == 0 && offlineFriends.Count == 0;
+            FriendsEmptyPanel.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
+            if (empty)
+            {
+                FriendsEmptyTitle.Text = "Todavía no tienes amigos en CB";
+                FriendsEmptyText.Text = "Escribe el handle de alguien arriba y pulsa AGREGAR para enviarle una solicitud.";
+            }
+        }
+
+        private async void RefreshFriends_Click(object sender, RoutedEventArgs e)
+        {
+            if (string.IsNullOrEmpty(service.LauncherPath) && !social.IsLinked)
+            {
+                UpdateFriendsIdentity();
+                return;
+            }
+
+            await LoadFriendsAsync();
+        }
+
+        private async void AddFriend_Click(object sender, RoutedEventArgs e)
+        {
+            var handle = (FriendHandleBox.Text ?? "").Trim().TrimStart('@');
+            if (handle.Length == 0)
+            {
+                SetStatus("Escribe el handle de CB de la persona.");
+                return;
+            }
+
+            try
+            {
+                await social.AddFriendAsync(handle);
+                FriendHandleBox.Text = string.Empty;
+                SetStatus("Solicitud de amistad enviada a @" + handle + ".");
+                await LoadFriendsAsync(true);
+            }
+            catch (Exception ex)
+            {
+                api.Dialogs.ShowErrorMessage(ex.Message, "CB Servers");
+            }
+        }
+
+        private async void FriendHandle_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key != Key.Enter) return;
+            e.Handled = true;
+
+            var handle = (FriendHandleBox.Text ?? "").Trim().TrimStart('@');
+            if (handle.Length == 0) return;
+
+            try
+            {
+                await social.AddFriendAsync(handle);
+                FriendHandleBox.Text = string.Empty;
+                SetStatus("Solicitud de amistad enviada a @" + handle + ".");
+                await LoadFriendsAsync(true);
+            }
+            catch (Exception ex)
+            {
+                api.Dialogs.ShowErrorMessage(ex.Message, "CB Servers");
+            }
+        }
+
+        private async void AcceptFriend_Click(object sender, RoutedEventArgs e)
+        {
+            await RunFriendActionAsync(sender, friend => social.AcceptFriendAsync(friend.CbId), "Solicitud aceptada.");
+        }
+
+        private async void DeclineFriend_Click(object sender, RoutedEventArgs e)
+        {
+            await RunFriendActionAsync(sender, friend => social.DeclineFriendAsync(friend.CbId), "Solicitud rechazada.");
+        }
+
+        private async void CancelFriend_Click(object sender, RoutedEventArgs e)
+        {
+            await RunFriendActionAsync(sender, friend => social.CancelFriendAsync(friend.CbId), "Solicitud cancelada.");
+        }
+
+        private async void RemoveFriend_Click(object sender, RoutedEventArgs e)
+        {
+            var friend = (sender as FrameworkElement)?.Tag as CbFriend;
+            if (friend == null) return;
+
+            var answer = api.Dialogs.ShowMessage("¿Quitar a " + friend.Name + " de tus amigos de CB?", "CB Servers", MessageBoxButton.YesNo, MessageBoxImage.Question);
+            if (answer != MessageBoxResult.Yes) return;
+
+            try
+            {
+                await social.RemoveFriendAsync(friend.CbId);
+                SetStatus(friend.Name + " ya no está en tus amigos.");
+                await LoadFriendsAsync(true);
+            }
+            catch (Exception ex)
+            {
+                api.Dialogs.ShowErrorMessage(ex.Message, "CB Servers");
+            }
+        }
+
+        private async Task RunFriendActionAsync(object sender, Func<CbFriend, Task> action, string successMessage)
+        {
+            var friend = (sender as FrameworkElement)?.Tag as CbFriend;
+            if (friend == null) return;
+
+            try
+            {
+                await action(friend);
+                SetStatus(successMessage + " · " + friend.Name);
+                await LoadFriendsAsync(true);
+            }
+            catch (Exception ex)
+            {
+                api.Dialogs.ShowErrorMessage(ex.Message, "CB Servers");
+            }
+        }
+
+        private async void FriendsDownload_Click(object sender, RoutedEventArgs e)
+        {
+            if (!await EnsureLauncherReadyAsync()) return;
+
+            Guard(() => service.OpenLauncher());
+            SetStatus("CB Launcher abierto. Inicia sesión una vez y pulsa REINTENTAR.");
+            social.ReloadIdentity();
+            UpdateFriendsIdentity();
+            FriendsDownloadButton.Content = "ABRIR CB";
+        }
+
+        private async void FriendsRetry_Click(object sender, RoutedEventArgs e)
+        {
+            social.ReloadIdentity();
+            UpdateFriendsIdentity();
+
+            if (!social.IsLinked)
+            {
+                api.Dialogs.ShowMessage(social.LinkError ?? "Todavía no hay una cuenta de CB en este PC.", "CB Servers");
+                return;
+            }
+
+            await LoadFriendsAsync();
+        }
+
         // ---------------- Navegación ----------------
 
         private void Tab_Click(object sender, RoutedEventArgs e)
@@ -651,14 +1006,20 @@ namespace CBServersPlaynite
         {
             GamesTab.Visibility = tag == "games" ? Visibility.Visible : Visibility.Collapsed;
             ServersTab.Visibility = tag == "servers" ? Visibility.Visible : Visibility.Collapsed;
+            FriendsTab.Visibility = tag == "friends" ? Visibility.Visible : Visibility.Collapsed;
             SettingsTab.Visibility = tag == "settings" ? Visibility.Visible : Visibility.Collapsed;
 
             TabGames.IsChecked = tag == "games";
             TabServers.IsChecked = tag == "servers";
+            TabFriends.IsChecked = tag == "friends";
             TabSettings.IsChecked = tag == "settings";
 
             if (tag == "servers") EnsureServerSelection();
             if (tag == "settings") UpdateSettingsValues(service.ReadProperties());
+            if (tag == "friends")
+            {
+                var ignored = LoadFriendsAsync();
+            }
         }
 
         // ---------------- Utilidades ----------------

@@ -186,6 +186,23 @@ namespace CBServersPlaynite
 
     public static class Catalog
     {
+        private static Dictionary<string, string> shortNames;
+
+        public static string ShortName(string backendId)
+        {
+            if (string.IsNullOrWhiteSpace(backendId)) return null;
+
+            if (shortNames == null)
+            {
+                var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var game in Create(string.Empty)) map[game.BackendId] = game.ShortName;
+                shortNames = map;
+            }
+
+            string name;
+            return shortNames.TryGetValue(backendId, out name) ? name : backendId;
+        }
+
         public static List<CbGame> Create(string assetsRoot)
         {
             return new List<CbGame>

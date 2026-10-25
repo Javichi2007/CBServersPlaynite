@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
@@ -14,10 +15,14 @@ namespace CBServersPlaynite
 {
     public class LauncherService
     {
+        private const string LauncherDownloadUrl = "https://github.com/CBServers/cb-launcher/releases/latest/download/cb-launcher.exe";
+        private const string LauncherChecksumsUrl = "https://github.com/CBServers/cb-launcher/releases/latest/download/checksums.txt";
+
         private static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
         private static readonly string[] ServerHosts = { "https://servers.cbservers.xyz", "https://servers.cbservers.dev" };
 
         private readonly string settingsPath;
+        private readonly string launcherDirectory;
         private readonly HttpClient http;
 
         public string PluginRoot { get; private set; }
@@ -40,9 +45,10 @@ namespace CBServersPlaynite
         {
             PluginRoot = pluginRoot;
             settingsPath = Path.Combine(userDataPath, "settings.json");
+            launcherDirectory = Path.Combine(userDataPath, "launcher");
             Settings = PluginSettings.Load(settingsPath);
             http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
-            http.DefaultRequestHeaders.UserAgent.ParseAdd("CBServersPlaynite/1.0");
+            http.DefaultRequestHeaders.UserAgent.ParseAdd("CBServersPlaynite/1.1");
             Reload();
         }
 
@@ -83,6 +89,8 @@ namespace CBServersPlaynite
             var protocol = GetProtocolExecutable();
             if (protocol != null) candidates.Add(protocol);
 
+            candidates.Add(Path.Combine(launcherDirectory, "cb-launcher.exe"));
+
             var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             candidates.Add(Path.Combine(profile, "Downloads", "cb-launcher.exe"));
             candidates.Add(Path.Combine(profile, "Downloads", "CB Launcher", "cb-launcher.exe"));
@@ -113,6 +121,99 @@ namespace CBServersPlaynite
             Settings.LauncherPath = path;
             Settings.Save(settingsPath);
             Reload();
+        }
+
+        public async Task<string> EnsureLauncherAsync()
+        {
+            if (!string.IsNullOrEmpty(LauncherPath) && File.Exists(LauncherPath)) return LauncherPath;
+
+            Directory.CreateDirectory(launcherDirectory);
+            var target = Path.Combine(launcherDirectory, "cb-launcher.exe");
+            var temporary = target + ".download";
+
+            try
+            {
+                using (var client = new HttpClient { Timeout = TimeSpan.FromMinutes(5) })
+                {
+                    client.DefaultRequestHeaders.UserAgent.ParseAdd("CBServersPlaynite/1.1");
+
+                    var checksums = await client.GetStringAsync(LauncherChecksumsUrl).ConfigureAwait(false);
+                    var expected = FindChecksum(checksums, "cb-launcher.exe");
+                    if (expected == null)
+                    {
+                        throw new InvalidOperationException("No se pudo verificar la descarga de CB Launcher.");
+                    }
+
+                    using (var response = await client.GetAsync(LauncherDownloadUrl, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false))
+                    {
+                        response.EnsureSuccessStatusCode();
+                        using (var source = await response.Content.ReadAsStreamAsync().ConfigureAwait(false))
+                        using (var destination = File.Create(temporary))
+                        {
+                            await source.CopyToAsync(destination).ConfigureAwait(false);
+                        }
+                    }
+
+                    string actual;
+                    using (var sha = SHA256.Create())
+                    using (var stream = File.OpenRead(temporary))
+                    {
+                        actual = BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+                    }
+
+                    if (!string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidOperationException("La descarga de CB Launcher no superó la verificación de integridad.");
+                    }
+                }
+
+                if (File.Exists(target))
+                {
+                    try { File.Delete(target); }
+                    catch (IOException)
+                    {
+                        throw new InvalidOperationException("Cierra CB Launcher para poder actualizarlo.");
+                    }
+                }
+
+                File.Move(temporary, target);
+            }
+            catch (HttpRequestException ex)
+            {
+                throw new InvalidOperationException("No se pudo descargar CB Launcher. Comprueba tu conexión.", ex);
+            }
+            catch (TaskCanceledException ex)
+            {
+                throw new InvalidOperationException("La descarga de CB Launcher tardó demasiado. Comprueba tu conexión.", ex);
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                throw new InvalidOperationException("Windows no permitió guardar CB Launcher en la carpeta del plugin.", ex);
+            }
+            finally
+            {
+                if (File.Exists(temporary))
+                {
+                    try { File.Delete(temporary); }
+                    catch { }
+                }
+            }
+
+            SetLauncherPath(target);
+            return target;
+        }
+
+        private static string FindChecksum(string text, string fileName)
+        {
+            foreach (var line in text.Split('\n'))
+            {
+                var parts = line.Trim().Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length >= 2 && parts[1].TrimStart('*').Equals(fileName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return parts[0];
+                }
+            }
+            return null;
         }
 
         public void SaveSettings()
