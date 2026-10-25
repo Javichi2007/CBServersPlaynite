@@ -1,0 +1,12 @@
+Id: CBServersPlaynite
+Name: CB Servers
+Author: Javichi2007
+Version: 1.0.0
+Module: CBServersPlaynite.dll
+Type: GenericPlugin
+Icon: Assets/cb-icon.png
+Links:
+  - Name: Source code
+    Url: https://github.com/Javichi2007/CBServersPlaynite
+  - Name: CB Servers Launcher
+    Url: https://github.com/CBServers/cb-launcher
